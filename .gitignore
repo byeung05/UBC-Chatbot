@@ -1,4 +1,4 @@
-venv/
+ragbot/
 .env
 __pycache__
 /Users/brandon/RAG-Chatbot/ubc-pair-grade-data-master

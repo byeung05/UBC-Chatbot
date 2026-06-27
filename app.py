@@ -7,6 +7,8 @@ from src.tfidf import load_vectorizer
 from src.retriever import PineconeHybridRetriever
 from src.rag_chain import make_llm, answer
 
+from src.rag_chain import make_llm, answer, format_docs 
+
 load_dotenv()
 require_env()
 
@@ -38,7 +40,20 @@ q = st.chat_input("Ask about courses, terms, instructors…")
 if q:
     st.session_state.chat.append(("user", q))
     with st.spinner("Thinking…"):
-        a = answer(llm, retriever, q)
+        # 1) retrieve once
+        docs = retriever.invoke(q)
+
+        # 2) show a quick debug panel
+        st.sidebar.success(f"Retrieved {len(docs)} docs")
+        with st.expander("🔎 Context preview (first 5 docs)"):
+            st.write(format_docs(docs, max_docs=5))  # bullets: [course term] + snippet
+
+        # 3) build the LLM answer using the same bullets
+        #    (this mirrors what `answer()` does internally )
+        from src.rag_chain import PROMPT  # prompt lives here 
+        msgs = PROMPT.format_messages(question=q, context=format_docs(docs))
+        a = llm.invoke(msgs).content
+
     st.session_state.chat.append(("assistant", a))
 
 for role, msg in st.session_state.chat:

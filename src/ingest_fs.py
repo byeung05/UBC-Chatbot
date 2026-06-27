@@ -1,5 +1,6 @@
 # src/ingest_fs.py
 from __future__ import annotations
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
 from langchain_core.documents import Document
@@ -8,8 +9,17 @@ from langchain_community.document_loaders import (
     CSVLoader, Docx2txtLoader, PyPDFLoader, TextLoader, WebBaseLoader
 )
 
-# Map extensions to loaders (extend as needed)
-EXT_LOADERS = {
+# -------- Config --------
+@dataclass
+class IngestConfig:
+    paths: Iterable[str | Path]          # files and/or folders
+    url: Optional[str] = None            # optional single URL
+    chunk_size: int = 1000
+    chunk_overlap: int = 100
+    fraction: float = 1.0                # take first X% of chunks (0<...<=1]
+
+# -------- Internal: loaders --------
+_EXT_LOADERS = {
     ".csv":  lambda p: CSVLoader(file_path=str(p)),
     ".pdf":  lambda p: PyPDFLoader(str(p)),
     ".docx": lambda p: Docx2txtLoader(str(p)),
@@ -17,8 +27,7 @@ EXT_LOADERS = {
     ".md":   lambda p: TextLoader(str(p)),
 }
 
-def _iter_files(paths: Iterable[str | Path]) -> Iterable[Path]:
-    """Yield all files from a list of files/dirs; recursive for dirs."""
+def iter_files(paths: Iterable[str | Path]) -> Iterable[Path]:
     for ps in paths:
         p = Path(ps)
         if not p.exists():
@@ -27,56 +36,47 @@ def _iter_files(paths: Iterable[str | Path]) -> Iterable[Path]:
         if p.is_file():
             yield p
         else:
-            # recursive; skip hidden/system files
             for fp in p.rglob("*"):
                 if fp.is_file() and not fp.name.startswith("."):
                     yield fp
 
-def load_docs_from_paths(
-    paths: Iterable[str | Path],
-    url: Optional[str] = None
-) -> List[Document]:
-    """Load docs from local files (csv/pdf/docx/txt/md) + optional single URL."""
+def load_docs(cfg: IngestConfig) -> List[Document]:
     docs: List[Document] = []
-    for f in _iter_files(paths):
-        loader_factory = EXT_LOADERS.get(f.suffix.lower())
-        if not loader_factory:
-            # Uncomment to see skipped types:
+    for f in iter_files(cfg.paths):
+        factory = _EXT_LOADERS.get(f.suffix.lower())
+        if not factory:
             # print(f"[skip] {f.name}")
             continue
         try:
-            loader = loader_factory(f)
-            docs.extend(loader.load())
+            docs.extend(factory(f).load())
         except Exception as e:
             print(f"[error] {f.name}: {e}")
 
-    if url:
+    if cfg.url:
         try:
-            docs.extend(WebBaseLoader(url).load())
+            docs.extend(WebBaseLoader(cfg.url).load())
         except Exception as e:
             print(f"[error] URL load failed: {e}")
-
     return docs
 
-def chunk_documents(
-    docs: List[Document],
-    chunk_size: int = 1000,
-    chunk_overlap: int = 100
-) -> List[Document]:
-    """Split documents into chunks."""
+def chunk(docs: List[Document], cfg: IngestConfig) -> List[Document]:
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap
+        chunk_size=cfg.chunk_size, chunk_overlap=cfg.chunk_overlap
     )
     return splitter.split_documents(docs)
 
-def take_first_fraction(
-    chunks: List[Document],
-    fraction: float = 1.0
-) -> List[Document]:
-    """Keep the FIRST fraction of chunks for fast smoke tests."""
+def take_fraction(chunks: List[Document], fraction: float) -> List[Document]:
     if not (0 < fraction <= 1.0):
         raise ValueError("fraction must be in (0, 1].")
     k = max(1, int(len(chunks) * fraction))
     return chunks[:k]
 
+# -------- Public API --------
+def ingest(cfg: IngestConfig) -> List[Document]:
+    """Load -> chunk -> optionally take first X% of chunks."""
+    docs = load_docs(cfg)
+    chunks = chunk(docs, cfg)
+    if cfg.fraction < 1.0:
+        chunks = take_fraction(chunks, cfg.fraction)
+    print(f"[ingest] docs={len(docs)} chunks={len(chunks)} (fraction={cfg.fraction:.2f})")
+    return chunks

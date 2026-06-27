@@ -10,11 +10,23 @@ from langchain_core.documents import Document
 from .config import SETTINGS, require_env
 from .embeddings import make_embedder, adaptive_embed_documents
 from .tfidf import build_tfidf, save_vectorizer
+import re
+
+def _extract_meta_from_csv_text(txt: str) -> dict:
+    meta = {}
+    for line in txt.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            key = k.strip().lower().replace(" ", "_")
+            val = v.strip()
+            if key == "year" and val.isdigit():
+                meta[key] = int(val)
+            else:
+                meta[key] = val
+    return meta
 
 def build_and_upsert(document_chunks: List[Document]):
     require_env()
-
-    # --- take first FRACTION in order ---
     n_total = len(document_chunks)
     k = max(1, int(n_total * SETTINGS.FRACTION))
     idxs = list(range(k))
@@ -23,11 +35,9 @@ def build_and_upsert(document_chunks: List[Document]):
     chunks = [document_chunks[i] for i in idxs]
     texts = [d.page_content for d in chunks]
 
-    # --- sparse (TF-IDF) ---
     vectorizer, X = build_tfidf(texts)
     save_vectorizer(vectorizer)
 
-    # --- Pinecone index (DOTPRODUCT for hybrid) ---
     emb = make_embedder()
     dim = len(emb.embed_query("dimension check"))
 
@@ -37,7 +47,7 @@ def build_and_upsert(document_chunks: List[Document]):
         pc.create_index(
             name=SETTINGS.HYBRID_INDEX_NAME,
             dimension=dim,
-            metric="dotproduct",  # REQUIRED for dense+sparse hybrid
+            metric="dotproduct",
             spec=ServerlessSpec(
                 cloud=SETTINGS.PINECONE_CLOUD,
                 region=SETTINGS.PINECONE_REGION
@@ -45,11 +55,14 @@ def build_and_upsert(document_chunks: List[Document]):
         )
     index = pc.Index(SETTINGS.HYBRID_INDEX_NAME)
 
-    # --- dense embeddings (batched) ---
     dense_vecs = adaptive_embed_documents(emb, texts)
 
-    # --- upsert hybrid ---
-    metas = [d.metadata | {"text": d.page_content} for d in chunks]
+    metas = []
+    for d in chunks:
+        base_meta = {k.lower().replace(" ", "_"): v for k, v in (d.metadata or {}).items()}
+        parsed = _extract_meta_from_csv_text(d.page_content)
+        metas.append(base_meta | parsed | {"text": d.page_content})
+
     buf = []
     for j, i_doc in enumerate(idxs):
         row = X.getrow(j)
